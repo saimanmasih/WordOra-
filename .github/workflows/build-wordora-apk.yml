@@ -1,0 +1,163 @@
+name: WordOra New APK Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find WordOra ZIP
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: WordOra ZIP not found."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Extract WordOra
+        run: |
+          set -e
+          rm -rf extracted
+          mkdir extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+      - name: Locate project
+        run: |
+          set -e
+
+          PACKAGE=$(find extracted -name package.json -type f | head -n 1)
+
+          if [ -z "$PACKAGE" ]; then
+            echo "ERROR: package.json not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PACKAGE")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project: $PROJECT_DIR"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Validate Hebrews 5 JSON
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          node -e "
+          const fs=require('fs');
+          const f='src/data/roman_urdu/hebrews_5.json';
+          const d=JSON.parse(fs.readFileSync(f,'utf8'));
+          console.log('HEBREWS 5 JSON: VALID');
+          console.log('Entries:', Array.isArray(d) ? d.length : 'object');
+          "
+
+      - name: Build WordOra
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          npm run build
+
+      - name: Install Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+
+      - name: Create Capacitor config
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.wordora.app",
+            "appName": "WordOra",
+            "webDir": "dist"
+          }
+          EOF
+
+      - name: Add Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npx cap add android
+
+      - name: Copy Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npx cap copy android
+
+      - name: Kotlin compatibility
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          cat >> build.gradle <<'EOF'
+
+          allprojects {
+              configurations.all {
+                  resolutionStrategy.eachDependency { details ->
+                      if (details.requested.group == "org.jetbrains.kotlin") {
+                          details.useVersion "1.8.22"
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Setup Android
+        uses: android-actions/setup-android@v3
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew clean
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          test -f "$APK"
+
+          echo "================================"
+          echo "WORDORA APK BUILD SUCCESS"
+          echo "================================"
+          ls -lh "$APK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WordOra-APK
+          path: ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
