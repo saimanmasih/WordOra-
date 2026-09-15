@@ -12,21 +12,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------
+      # Find the WordOra ZIP
+      # ---------------------------------------------------------
       - name: Find WordOra ZIP
+        shell: bash
         run: |
           set -e
 
-          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
+          echo "Available ZIP files:"
+          find . -type f -iname "*.zip" -print
+
+          ZIP_FILE=$(find . -type f -iname "*.zip" \
+            ! -path "./.git/*" \
+            -printf '%T@ %p\n' \
+            | sort -nr \
+            | head -n 1 \
+            | cut -d' ' -f2-)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: WordOra ZIP file was not found."
+            echo "ERROR: No WordOra ZIP file was found."
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          echo "Using newest ZIP:"
+          echo "$ZIP_FILE"
+
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
+      # ---------------------------------------------------------
+      # Extract project
+      # ---------------------------------------------------------
       - name: Extract WordOra project
+        shell: bash
         run: |
           set -e
 
@@ -35,29 +53,76 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d extracted
 
+          echo "Extraction completed."
+
+      # ---------------------------------------------------------
+      # Locate package.json
+      # ---------------------------------------------------------
       - name: Locate WordOra project
+        shell: bash
         run: |
           set -e
 
-          PACKAGE_FILE=$(find extracted -name package.json -type f | head -n 1)
+          PACKAGE_FILE=$(find extracted \
+            -name package.json \
+            -type f \
+            ! -path "*/node_modules/*" \
+            | head -n 1)
 
           if [ -z "$PACKAGE_FILE" ]; then
-            echo "ERROR: package.json was not found."
+            echo "ERROR: package.json was not found inside WordOra ZIP."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$PACKAGE_FILE")
 
-          echo "Project directory: $PROJECT_DIR"
+          echo "WordOra project:"
+          echo "$PROJECT_DIR"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
+      # ---------------------------------------------------------
+      # Show important project information
+      # ---------------------------------------------------------
+      - name: Verify WordOra source
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Roman Urdu Hebrews files:"
+          find src/data/roman_urdu -maxdepth 1 -type f -iname "hebrews*" -print || true
+
+          echo ""
+          echo "Checking Hebrews 5 file..."
+
+          if [ ! -f "src/data/roman_urdu/hebrews_5.json" ]; then
+            echo "ERROR: src/data/roman_urdu/hebrews_5.json was not found."
+            exit 1
+          fi
+
+          echo "Hebrews 5 file found."
+
+      # ---------------------------------------------------------
+      # Setup Node
+      # ---------------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ env.PROJECT_DIR }}/package-lock.json
 
+      # ---------------------------------------------------------
+      # Install dependencies
+      # ---------------------------------------------------------
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
 
@@ -67,14 +132,59 @@ jobs:
             npm install
           fi
 
-      - name: Build WordOra
+      # ---------------------------------------------------------
+      # Validate Hebrews 5 JSON BEFORE Vite build
+      # ---------------------------------------------------------
+      - name: Validate Roman Urdu JSON
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const file = "src/data/roman_urdu/hebrews_5.json";
+
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            const data = JSON.parse(raw);
+
+            console.log("✅ hebrews_5.json is valid JSON.");
+
+            if (Array.isArray(data)) {
+              console.log("Verse entries:", data.length);
+            } else if (data && typeof data === "object") {
+              console.log("JSON root: object");
+
+              if (Array.isArray(data.verses)) {
+                console.log("Verse entries:", data.verses.length);
+              }
+            }
+          } catch (error) {
+            console.error("❌ hebrews_5.json is INVALID.");
+            console.error(error.message);
+            process.exit(1);
+          }
+          NODE
+
+      # ---------------------------------------------------------
+      # Build web application
+      # ---------------------------------------------------------
+      - name: Build WordOra
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
           npm run build
 
+      # ---------------------------------------------------------
+      # Install Capacitor
+      # ---------------------------------------------------------
       - name: Install Capacitor
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
 
@@ -83,8 +193,12 @@ jobs:
             @capacitor/cli \
             @capacitor/android
 
+      # ---------------------------------------------------------
+      # Capacitor configuration
+      # ---------------------------------------------------------
       - name: Create Capacitor configuration
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           cat > capacitor.config.json <<'EOF'
           {
@@ -94,20 +208,34 @@ jobs:
           }
           EOF
 
+      # ---------------------------------------------------------
+      # Add Android
+      # ---------------------------------------------------------
       - name: Add Android platform
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
+
           npx cap add android
 
+      # ---------------------------------------------------------
+      # Copy web build into Android
+      # ---------------------------------------------------------
       - name: Copy WordOra into Android
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
+
           npx cap copy android
 
+      # ---------------------------------------------------------
+      # Kotlin compatibility
+      # ---------------------------------------------------------
       - name: Force Kotlin version compatibility
         working-directory: ${{ env.PROJECT_DIR }}/android
+        shell: bash
         run: |
           set -e
 
@@ -124,6 +252,9 @@ jobs:
           }
           EOF
 
+      # ---------------------------------------------------------
+      # Java 21
+      # ---------------------------------------------------------
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
@@ -131,11 +262,18 @@ jobs:
           java-version: 21
           cache: gradle
 
+      # ---------------------------------------------------------
+      # Android SDK
+      # ---------------------------------------------------------
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      # ---------------------------------------------------------
+      # Build APK
+      # ---------------------------------------------------------
       - name: Build WordOra APK
         working-directory: ${{ env.PROJECT_DIR }}/android
+        shell: bash
         run: |
           set -e
 
@@ -145,8 +283,12 @@ jobs:
 
           ./gradlew assembleDebug --stacktrace
 
+      # ---------------------------------------------------------
+      # Verify APK
+      # ---------------------------------------------------------
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
 
@@ -157,12 +299,30 @@ jobs:
             exit 1
           fi
 
+          echo "======================================"
           echo "SUCCESS: WordOra APK generated."
+          echo "======================================"
+
           ls -lh "$APK"
 
+      # ---------------------------------------------------------
+      # Upload APK
+      # ---------------------------------------------------------
       - name: Upload WordOra APK
         uses: actions/upload-artifact@v4
         with:
           name: WordOra-APK
           path: ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+ 
+### Ab kya karna hai
+
+**1.** GitHub → `.github/workflows/build-apk.yml` kholen.  
+**2.** Purana code poora delete karein.  
+**3.** Upar wala code paste karein.  
+**4.** **Commit changes** karein.  
+**5.** `Actions → Build WordOra APK → Run workflow` karein.
+
+Sab se important baat: **apni new WordOra ZIP bhi repository mein properly upload honi chahiye.**
+
+Agar build phir fail hota hai, **poora error nahi chahiye** — sirf Actions ka **red error wala hissa** screenshot ya text bhej dein. Phir hum next smallest fix karenge.
